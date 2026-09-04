@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>MP3 → MIDI (Transkun v2)</title>
+<style>
+  body{font-family:system-ui;max-width:560px;margin:40px auto;padding:0 16px}
+  input,button{width:100%;padding:10px;margin:6px 0;box-sizing:border-box}
+  button{background:#2563eb;color:#fff;border:0;border-radius:6px;cursor:pointer}
+  #log{background:#f3f4f6;padding:12px;border-radius:6px;white-space:pre-wrap;font-size:14px}
+</style>
+</head>
+<body>
+<h1>🎹 MP3 → MIDI</h1>
+<p>Chạy model <b>Transkun v2</b> trên GitHub Actions.</p>
+
+<input id="owner" placeholder="GitHub user/org (vd: tenban)">
+<input id="repo"  placeholder="Tên repo (vd: mp3-to-midi)">
+<input id="token" type="password" placeholder="Fine-grained PAT (Actions: R/W, Contents: R/W)">
+<input id="url"   placeholder="Link tải trực tiếp file mp3 (Dropbox ?dl=1, catbox.moe, ...)">
+<button id="go">Chuyển đổi</button>
+<div id="log">Sẵn sàng.</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = m => $("log").textContent += "\n" + m;
+["owner","repo","token"].forEach(k => {
+  $(k).value = localStorage.getItem(k) || "";
+  $(k).onchange = () => localStorage.setItem(k, $(k).value);
+});
+
+const api = (token) => (path, opt = {}) =>
+  fetch("https://api.github.com" + path, {
+    ...opt,
+    headers: { Authorization: "Bearer " + token,
+               Accept: "application/vnd.github+json",
+               "Content-Type": "application/json", ...(opt.headers||{}) }
+  });
+
+$("go").onclick = async () => {
+  const owner = $("owner").value.trim(), repo = $("repo").value.trim();
+  const token = $("token").value.trim(), url = $("url").value.trim();
+  if (!owner || !repo || !token || !url) return alert("Điền đủ thông tin");
+  const gh = api(token);
+  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+  $("log").textContent = "Job ID: " + jobId;
+
+  // 1. Kích hoạt workflow
+  const r = await gh(`/repos/${owner}/${repo}/actions/workflows/transcribe.yml/dispatches`, {
+    method: "POST",
+    body: JSON.stringify({ ref: "main", inputs: { audio_url: url, job_id: jobId } })
+  });
+  if (r.status !== 204) return log("Lỗi kích hoạt: " + r.status + " " + await r.text());
+  log("Đã gửi yêu cầu, đang chờ Actions xử lý (5–15 phút)...");
+
+  // 2. Poll release
+  const tag = "midi-" + jobId;
+  for (let i = 0; i < 240; i++) {          // tối đa ~60 phút
+    await new Promise(s => setTimeout(s, 15000));
+    const rel = await gh(`/repos/${owner}/${repo}/releases/tags/${tag}`);
+    if (rel.ok) {
+      const data = await rel.json();
+      const asset = data.assets.find(a => a.name.endsWith(".mid"));
+      log("✅ Xong!");
+      const a = document.createElement("a");
+      a.href = asset.browser_download_url; a.textContent = "⬇ Tải " + asset.name;
+      $("log").appendChild(document.createElement("br"));
+      $("log").appendChild(a);
+      return;
+    }
+    log(`... vẫn đang xử lý (${(i+1)*15}s)`);
+  }
+  log("⏰ Hết thời gian chờ, kiểm tra tab Actions của repo.");
+};
+</script>
+</body>
+</html>
