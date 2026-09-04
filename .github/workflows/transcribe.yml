@@ -1,14 +1,9 @@
 name: MP3 to MIDI (Transkun v2)
 
 on:
-  workflow_dispatch:
-    inputs:
-      audio_url:
-        description: "Link tải trực tiếp file mp3/wav"
-        required: true
-      job_id:
-        description: "ID định danh (frontend tự sinh)"
-        required: true
+  push:
+    branches: [main]
+    paths: ["uploads/**"]
 
 permissions:
   contents: write
@@ -17,46 +12,56 @@ jobs:
   transcribe:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      AUDIO_URL: ${{ inputs.audio_url }}
-      JOB_ID: ${{ inputs.job_id }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Xác định file vừa upload
+        id: files
+        env:
+          COMMITS: ${{ toJson(github.event.commits) }}
+        run: |
+          echo "$COMMITS" | jq -r '.[].added[], .[].modified[]' \
+            | grep -E '^uploads/.+\.(mp3|wav|m4a|flac|ogg)$' | sort -u > files.txt || true
+          echo "Files:"; cat files.txt
+          if [ ! -s files.txt ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+
       - uses: actions/setup-python@v5
+        if: steps.files.outputs.skip != 'true'
         with:
           python-version: "3.10"
           cache: pip
 
-      - name: Cài ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-
-      - name: Cài PyTorch (CPU) + Transkun
+      - name: Cài ffmpeg, PyTorch (CPU), Transkun
+        if: steps.files.outputs.skip != 'true'
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install --upgrade pip
           pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install "transkun>=2.0"
 
-      - name: Tải audio và chuyển sang WAV
-        run: |
-          mkdir -p work
-          curl -L --fail --max-filesize 209715200 -o work/input "$AUDIO_URL"
-          ffmpeg -y -loglevel error -i work/input -ac 1 -ar 44100 work/input.wav
-
-      - name: Transcribe bằng Transkun v2
-        run: transkun work/input.wav "work/${JOB_ID}.mid" --device cpu
-
-      - name: Đăng lên GitHub Release
+      - name: Transcribe + đăng Release
+        if: steps.files.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="midi-${JOB_ID}"
-          gh release create "$TAG" "work/${JOB_ID}.mid" \
-            --title "$TAG" \
-            --notes "Tạo bởi Transkun v2 – run ${{ github.run_id }}"
+          mkdir -p work
+          while read -r f; do
+            job=$(basename "$f"); job="${job%.*}"
+            echo "=== $job ==="
+            ffmpeg -y -loglevel error -i "$f" -ac 1 -ar 44100 "work/$job.wav"
+            transkun "work/$job.wav" "work/$job.mid" --device cpu
+            gh release create "midi-$job" "work/$job.mid" \
+              --title "midi-$job" --notes "Transkun v2 – run ${{ github.run_id }}"
+          done < files.txt
 
-      - name: Lưu artifact dự phòng
-        uses: actions/upload-artifact@v4
-        with:
-          name: midi-${{ inputs.job_id }}
-          path: work/*.mid
+      - name: Xóa file audio đã xử lý
+        if: always() && steps.files.outputs.skip != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          xargs -a files.txt git rm -q --ignore-unmatch
+          git commit -m "cleanup: $(tr '\n' ' ' < files.txt) [skip ci]" || exit 0
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main && git push && break
+            sleep 5
+          done
