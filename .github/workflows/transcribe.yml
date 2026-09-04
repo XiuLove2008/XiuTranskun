@@ -1,0 +1,62 @@
+name: MP3 to MIDI (Transkun v2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      audio_url:
+        description: "Link tải trực tiếp file mp3/wav"
+        required: true
+      job_id:
+        description: "ID định danh (frontend tự sinh)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AUDIO_URL: ${{ inputs.audio_url }}
+      JOB_ID: ${{ inputs.job_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Cài ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Cài PyTorch (CPU) + Transkun
+        run: |
+          pip install --upgrade pip
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install "transkun>=2.0"
+
+      - name: Tải audio và chuyển sang WAV
+        run: |
+          mkdir -p work
+          curl -L --fail --max-filesize 209715200 -o work/input "$AUDIO_URL"
+          ffmpeg -y -loglevel error -i work/input -ac 1 -ar 44100 work/input.wav
+
+      - name: Transcribe bằng Transkun v2
+        run: transkun work/input.wav "work/${JOB_ID}.mid" --device cpu
+
+      - name: Đăng lên GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="midi-${JOB_ID}"
+          gh release create "$TAG" "work/${JOB_ID}.mid" \
+            --title "$TAG" \
+            --notes "Tạo bởi Transkun v2 – run ${{ github.run_id }}"
+
+      - name: Lưu artifact dự phòng
+        uses: actions/upload-artifact@v4
+        with:
+          name: midi-${{ inputs.job_id }}
+          path: work/*.mid
